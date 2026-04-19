@@ -10,102 +10,64 @@ CORS(app)
 API_KEY = "ff4db192-c9ea-4b22-a0af-8e8c6ae93b7b"
 headers = {"Authorization": API_KEY}
 
-# Хранилище: { "LAL": {"avg": 220, "last10": [...]}, ... }
-cache = {"stats": {}}
+def get_stats_for_team(t_id):
+    """Вспомогательная функция для получения цифр по ID"""
+    params = {"team_ids[]": [t_id], "per_page": 15}
+    res = requests.get("https://api.balldontlie.io/v1/games", params=params, headers=headers)
+    if res.status_code == 200:
+        games = res.json().get("data", [])
+        totals = [g["home_team_score"] + g["visitor_team_score"] for g in games if g.get("home_team_score")]
+        if totals:
+            return {"avg": sum(totals) / len(totals), "last10": totals[:10]}
+    return {"avg": 0, "last10": []}
 
-def get_team_ids_from_upcoming(upcoming_data):
-    """Собирает уникальные ID всех команд из списка будущих матчей"""
-    team_ids = set()
-    for g in upcoming_data:
-        team_ids.add(g["home_team"]["id"])
-        team_ids.add(g["visitor_team"]["id"])
-    return list(team_ids)
-
-def update_cache_for_teams(team_ids):
-    """Загружает историю только для конкретных команд из списка"""
-    for t_id in team_ids:
-        # Берем последние 15 игр для каждой команды, чтобы была выборка
-        params = {"team_ids[]": [t_id], "per_page": 15}
-        res = requests.get("https://api.balldontlie.io/v1/games", params=params, headers=headers)
-        
-        if res.status_code == 200:
-            games = res.json().get("data", [])
-            totals = []
-            abbr = ""
-            for g in games:
-                h_s = g.get("home_team_score", 0)
-                v_s = g.get("visitor_team_score", 0)
-                if h_s and v_s:
-                    totals.append(h_s + v_s)
-                # Узнаем аббревиатуру команды (нужна для ключа в кэше)
-                if not abbr:
-                    if g["home_team"]["id"] == t_id: abbr = g["home_team"]["abbreviation"]
-                    else: abbr = g["visitor_team"]["abbreviation"]
-            
-            if totals and abbr:
-                cache["stats"][abbr] = {
-                    "avg": sum(totals) / len(totals),
-                    "last10": totals[:10]
-                }
-
-@app.route('/')
-def home():
-    return "NBA Server: Targeted Cache Mode", 200
-
-@app.route('/teams', methods=['GET'])
-def get_teams():
-    r = requests.get("https://api.balldontlie.io/v1/teams", headers=headers)
-    if r.status_code == 200:
-        data = r.json().get("data", [])
-        return jsonify({"teams": [{"abbreviation": t["abbreviation"], "fullName": t["full_name"]} for t in data]})
-    return jsonify({"teams": []})
-
-@app.route('/upcoming_matches', methods=['GET'])
-def get_upcoming_matches():
+@app.route('/upcoming_with_stats', methods=['GET'])
+def get_upcoming_with_stats():
+    """Этот метод Splash Activity будет ждать до победного"""
     today = datetime.date.today().isoformat()
-    params = {"per_page": 50, "start_date": today}
+    # Берем чуть меньше игр (например, 15), чтобы не ждать вечность на заставке
+    params = {"per_page": 15, "start_date": today}
     
     r = requests.get("https://api.balldontlie.io/v1/games", params=params, headers=headers)
-    matches = []
+    if r.status_code != 200:
+        return jsonify([])
+
+    raw_data = r.json().get("data", [])
+    upcoming = [g for g in raw_data if g.get("period") == 0 and "Final" not in g.get("status", "")]
     
-    if r.status_code == 200:
-        raw_data = r.json().get("data", [])
-        # Очищаем только от завершенных игр
-        upcoming = [g for g in raw_data if g.get("period") == 0 and "Final" not in g.get("status", "")]
-        upcoming.sort(key=lambda x: x.get("date", ""))
+    full_data = []
+    # Кэшируем внутри одного запроса, чтобы не качать дважды для разных матчей
+    local_cache = {}
 
-        # --- КРИТИЧЕСКИЙ МОМЕНТ: ОБНОВЛЯЕМ КЭШ ТОЛЬКО ДЛЯ ЭТИХ КОМАНД ---
-        team_ids = get_team_ids_from_upcoming(upcoming)
-        update_cache_for_teams(team_ids)
-        # --------------------------------------------------------------
+    for g in upcoming:
+        h_id = g["home_team"]["id"]
+        a_id = g["visitor_team"]["id"]
+        h_abbr = g["home_team"]["abbreviation"]
+        a_abbr = g["visitor_team"]["abbreviation"]
 
-        for g in upcoming:
-            d = g.get("date", "")
-            date_str = f"{d[8:10]}.{d[5:7]}" if len(d) >= 10 else "TBD"
-            matches.append({
-                "homeTeam": g["home_team"]["abbreviation"],
-                "awayTeam": g["visitor_team"]["abbreviation"],
-                "startTime": f"{date_str} | {g.get('status', 'Scheduled')}"
-            })
-            
-    return jsonify(matches)
+        if h_abbr not in local_cache:
+            local_cache[h_abbr] = get_stats_for_team(h_id)
+        if a_abbr not in local_cache:
+            local_cache[a_abbr] = get_stats_for_team(a_id)
 
-@app.route('/match_stats', methods=['GET'])
-def get_stats():
-    h_abbr = request.args.get('home')
-    a_abbr = request.args.get('away')
+        d = g.get("date", "")
+        date_str = f"{d[8:10]}.{d[5:7]}" if len(d) >= 10 else "TBD"
 
-    h_data = cache["stats"].get(h_abbr)
-    a_data = cache["stats"].get(a_abbr)
-
-    if h_data and a_data:
-        return jsonify({
-            "home": {"last10": {"avgTotal": h_data["avg"], "last10Totals": h_data["last10"]}},
-            "away": {"last10": {"avgTotal": a_data["avg"], "last10Totals": a_data["last10"]}},
-            "headToHead": {"avgTotal": (h_data["avg"] + a_data["avg"]) / 2}
+        full_data.append({
+            "homeTeam": h_abbr,
+            "awayTeam": a_abbr,
+            "startTime": f"{date_str} | {g.get('status', 'Scheduled')}",
+            "stats": {
+                "home": local_cache[h_abbr],
+                "away": local_cache[a_abbr]
+            }
         })
     
-    return jsonify({"error": f"No stats for {h_abbr} or {a_abbr}"}), 404
+    return jsonify(full_data)
+
+# Оставляем старые эндпоинты для совместимости, если нужно
+@app.route('/')
+def home(): return "Ready", 200
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=10000)
