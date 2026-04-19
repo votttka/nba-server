@@ -7,18 +7,15 @@ from flask_cors import CORS
 app = Flask(__name__)
 CORS(app)
 
-# Твой рабочий API ключ
 API_KEY = "ff4db192-c9ea-4b22-a0af-8e8c6ae93b7b"
 headers = {"Authorization": API_KEY}
 
 @app.route('/')
 def home():
-    """Корень для проверки связи (Splash Screen)"""
     return "Server Online", 200
 
 @app.route('/teams', methods=['GET'])
 def get_teams():
-    """Список команд для выпадающего списка"""
     r = requests.get("https://api.balldontlie.io/v1/teams", headers=headers)
     if r.status_code == 200:
         data = r.json().get("data", [])
@@ -28,13 +25,13 @@ def get_teams():
 
 @app.route('/upcoming_matches', methods=['GET'])
 def get_upcoming_matches():
-    """Список матчей, начиная с СЕГОДНЯШНЕЙ даты"""
+    """Только БУДУЩИЕ игры для ставок"""
     today = datetime.date.today().isoformat()
     
-    # Фильтруем по дате начала, чтобы не лез архив 20-летней давности
+    # start_date = сегодня. API вернет всё, что запланировано от текущего момента и дальше.
     params = {
-        "per_page": 50,
-        "start_date": today
+        "per_page": 100,
+        "start_date": today 
     }
     
     r = requests.get("https://api.balldontlie.io/v1/games", params=params, headers=headers)
@@ -43,18 +40,17 @@ def get_upcoming_matches():
     if r.status_code == 200:
         data = r.json().get("data", [])
         
-        # Если на сегодня/будущее игр нет, берем просто последние 50, но без старья
-        if not data:
-            r = requests.get("https://api.balldontlie.io/v1/games", params={"per_page": 50}, headers=headers)
-            data = r.json().get("data", [])
+        # Фильтруем только те игры, которые еще не начались (status не содержит очки и не 'Final')
+        # И сортируем по дате: ближайшие к нам — в самом верху
+        data.sort(key=lambda x: x.get("date", ""))
 
         for g in data:
+            # Пропускаем игры, которые уже завершены, если API их случайно подмешало
+            if g.get("period") != 0 or "Final" in g.get("status", ""):
+                continue
+
             d = g.get("date", "")
-            # Форматируем дату в понятный вид ДД.ММ
-            if len(d) >= 10:
-                date_str = f"{d[8:10]}.{d[5:7]}"
-            else:
-                date_str = "TBD"
+            date_str = f"{d[8:10]}.{d[5:7]}" if len(d) >= 10 else "TBD"
             
             matches.append({
                 "homeTeam": g["home_team"]["abbreviation"],
@@ -66,10 +62,11 @@ def get_upcoming_matches():
 
 @app.route('/match_stats', methods=['GET'])
 def get_stats():
-    """Статистика для расчета (последние 100 игр)"""
+    """Анализ истории для расчета валуя (берем 100 последних ЛЮБЫХ игр)"""
     h_abbr = request.args.get('home')
     a_abbr = request.args.get('away')
     
+    # Для статистики нам как раз нужны прошедшие игры, поэтому тут фильтры по датам не ставим
     r = requests.get("https://api.balldontlie.io/v1/games", params={"per_page": 100}, headers=headers)
     
     h_totals, a_totals = [], []
@@ -79,7 +76,6 @@ def get_stats():
             h_s = g.get("home_team_score", 0)
             v_s = g.get("visitor_team_score", 0)
             
-            # Собираем статистику только по завершенным играм
             if h_s and v_s and (h_s + v_s > 0):
                 total = h_s + v_s
                 if g["home_team"]["abbreviation"] == h_abbr or g["visitor_team"]["abbreviation"] == h_abbr:
@@ -99,9 +95,8 @@ def get_stats():
 
 @app.route('/calculate', methods=['GET'])
 def calculate():
-    """Заглушка для совместимости с Android Retrofit"""
     return "OK", 200
 
 if __name__ == '__main__':
-    # Порт 10000 для Render
     app.run(host='0.0.0.0', port=10000)
+    
