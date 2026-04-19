@@ -7,27 +7,22 @@ from flask_cors import CORS
 app = Flask(__name__)
 CORS(app)
 
-# Твой API ключ
 API_KEY = "ff4db192-c9ea-4b22-a0af-8e8c6ae93b7b"
 headers = {"Authorization": API_KEY}
 
-def api_request(url, params=None, retries=3):
-    for i in range(retries):
-        try:
-            response = requests.get(url, params=params, headers=headers)
-            if response.status_code == 200:
-                return response.json()
-            if response.status_code == 429: # Ограничение частоты запросов
-                time.sleep(5)
-                continue
-            return None
-        except:
-            time.sleep(2)
-    return None
+def api_request(url, params=None):
+    try:
+        response = requests.get(url, params=params, headers=headers)
+        if response.status_code == 200:
+            return response.json()
+        return None
+    except Exception as e:
+        print(f"API Error: {e}")
+        return None
 
 @app.route('/')
 def home():
-    return "NBA Betting Server is Online!"
+    return "NBA Analytics Server (Strict Mode) Active"
 
 @app.route('/teams', methods=['GET'])
 def get_teams():
@@ -37,39 +32,69 @@ def get_teams():
         return jsonify({"teams": teams})
     return jsonify({"teams": []})
 
-# ТОТ САМЫЙ ЭНДПОИНТ, КОТОРОГО НЕ ХВАТАЛО
 @app.route('/upcoming_matches', methods=['GET'])
 def get_upcoming_matches():
-    # Запрашиваем игры. В бесплатном API даты могут быть ограничены,
-    # поэтому если данных нет, мы вернем "заглушку", чтобы ты мог проверить спиннер.
-    raw_data = api_request("https://api.balldontlie.io/v1/games", params={"per_page": 10})
-    
+    # Берем последние игры (включая сегодняшние)
+    raw_data = api_request("https://api.balldontlie.io/v1/games", params={"per_page": 25})
     matches = []
     if raw_data and "data" in raw_data:
         for game in raw_data["data"]:
+            d = game.get("date", "")
+            formatted_date = f"{d[8:10]}.{d[5:7]}" if len(d) > 10 else ""
             matches.append({
                 "homeTeam": game["home_team"]["abbreviation"],
                 "awayTeam": game["visitor_team"]["abbreviation"],
-                "startTime": game.get("status", "TBD")
+                "startTime": f"{formatted_date} {game.get('status', '')}"
             })
-    
-    # Если матчей в API на сегодня нет, добавим один тестовый, чтобы спиннер ожил
-    if not matches:
-        matches.append({
-            "homeTeam": "LAL",
-            "awayTeam": "GSW",
-            "startTime": "Test Match"
-        })
-        
     return jsonify(matches)
 
 @app.route('/match_stats', methods=['GET'])
 def get_stats():
-    # Заглушка для статистики, чтобы приложение не падало при расчете
+    home_abbr = request.args.get('home')
+    away_abbr = request.args.get('away')
+    
+    # Запрашиваем исторические данные
+    raw_games = api_request("https://api.balldontlie.io/v1/games", params={"per_page": 100})
+    
+    home_totals = []
+    away_totals = []
+    
+    if raw_games and "data" in raw_games:
+        for g in raw_games["data"]:
+            h_score = g.get("home_team_score", 0)
+            v_score = g.get("visitor_team_score", 0)
+            
+            # Считаем только завершенные матчи, где есть счет
+            if h_score > 0 and v_score > 0:
+                total = h_score + v_score
+                if g["home_team"]["abbreviation"] == home_abbr or g["visitor_team"]["abbreviation"] == home_abbr:
+                    home_totals.append(total)
+                if g["home_team"]["abbreviation"] == away_abbr or g["visitor_team"]["abbreviation"] == away_abbr:
+                    away_totals.append(total)
+
+    # КРИТИЧЕСКАЯ ПРОВЕРКА: Если данных нет хотя бы по одной команде — никакой "заглушки"
+    if not home_totals or not away_totals:
+        return jsonify(None), 404  # Отправляем 404, чтобы Android понял: данных нет
+
+    avg_home = sum(home_totals) / len(home_totals)
+    avg_away = sum(away_totals) / len(away_totals)
+    
     return jsonify({
-        "home": {"last10": {"avgTotal": 110.5, "last10Totals": [110, 112, 108]}},
-        "away": {"last10": {"avgTotal": 108.2, "last10Totals": [105, 115, 102]}},
-        "headToHead": {"avgTotal": 215.0}
+        "home": {
+            "last10": {
+                "avgTotal": avg_home,
+                "last10Totals": home_totals[-10:]
+            }
+        },
+        "away": {
+            "last10": {
+                "avgTotal": avg_away,
+                "last10Totals": away_totals[-10:]
+            }
+        },
+        "headToHead": {
+            "avgTotal": (avg_home + avg_away) / 2
+        }
     })
 
 if __name__ == '__main__':
