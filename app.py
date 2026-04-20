@@ -13,14 +13,10 @@ CORS(app)
 
 API_KEY = "de0a081d8eb05282905920ff73eba124"
 
-# Исключаем NBA
-EXCLUDED_LEAGUES = ["NBA", "National Basketball Association"]
-EXCLUDED_TOURNAMENTS = ["nba"]
-
 master_cache = {"data": None, "last_update": None, "loading": False}
 
 def make_api_request(endpoint):
-    """Делает запрос к v1.basketball.api-sports.io (все лиги кроме NBA)"""
+    """Делает запрос к v1.basketball.api-sports.io (все лиги, нет NBA)"""
     try:
         conn = http.client.HTTPSConnection("v1.basketball.api-sports.io")
         headers = {'x-apisports-key': API_KEY}
@@ -38,26 +34,8 @@ def make_api_request(endpoint):
         print(f"   Ошибка: {e}")
         return None
 
-def is_nba_game(game):
-    """Проверяет, является ли матч NBA"""
-    league = game.get("league", {})
-    league_name = league.get("name", "")
-    
-    tournament = game.get("tournament", {})
-    tournament_name = tournament.get("name", "")
-    
-    # Проверяем по разным полям
-    if "nba" in league_name.lower() or "nba" in tournament_name.lower():
-        return True
-    if league_name in EXCLUDED_LEAGUES:
-        return True
-    if tournament_name in EXCLUDED_TOURNAMENTS:
-        return True
-    
-    return False
-
 def fetch_upcoming_games(days_ahead=2):
-    """Получает матчи на ближайшие дни (исключая NBA)"""
+    """Получает матчи на ближайшие дни"""
     all_games = []
     for i in range(days_ahead + 1):
         date = (datetime.now() + timedelta(days=i)).strftime("%Y-%m-%d")
@@ -66,16 +44,10 @@ def fetch_upcoming_games(days_ahead=2):
         
         if result and "response" in result:
             games = result["response"]
-            # Фильтруем: только предстоящие и не NBA
-            filtered = []
-            for g in games:
-                status = g.get("status", {}).get("long", "")
-                if status in ["Not Started", "Scheduled"]:
-                    if not is_nba_game(g):
-                        filtered.append(g)
-            
-            all_games.extend(filtered)
-            print(f"   {date}: {len(filtered)} не-NBA матчей (всего {len(games)})")
+            # Только предстоящие матчи
+            upcoming = [g for g in games if g.get("status", {}).get("long") in ["Not Started", "Scheduled"]]
+            all_games.extend(upcoming)
+            print(f"   {date}: {len(upcoming)} матчей")
         
         time.sleep(0.3)
     
@@ -102,7 +74,6 @@ def fetch_last_games(team_id, limit=10):
                 games_analyzed += 1
         
         avg = round(total_points / games_analyzed, 2) if games_analyzed > 0 else 0
-        print(f"      Команда {team_id}: {games_analyzed} игр, среднее {avg}")
         return avg, games_analyzed
     
     return 0, 0
@@ -126,31 +97,30 @@ def fetch_last_h2h(team1_id, team2_id, limit=5):
                 games_analyzed += 1
         
         avg = round(total_points / games_analyzed, 2) if games_analyzed > 0 else 0
-        print(f"      H2H: {games_analyzed} встреч, средний тотал {avg}")
         return avg, games_analyzed
     
     return 0, 0
 
 def update_master_cache():
-    """Обновляет кэш - собирает данные по матчам (кроме NBA)"""
+    """Обновляет кэш"""
     if master_cache["loading"]:
         return
     
     master_cache["loading"] = True
     print("\n" + "=" * 60)
     print(f"🔄 ОБНОВЛЕНИЕ КЭША - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    print("🚫 NBA исключена")
+    print("📡 Источник: v1.basketball.api-sports.io (без NBA)")
     print("=" * 60)
     
-    print("\n📅 Сбор матчей (кроме NBA):")
+    print("\n📅 Сбор матчей:")
     games = fetch_upcoming_games(2)
     
     if not games:
-        print("❌ НЕТ ПРЕДСТОЯЩИХ МАТЧЕЙ (кроме NBA)")
+        print("❌ НЕТ ПРЕДСТОЯЩИХ МАТЧЕЙ")
         master_cache["loading"] = False
         return
     
-    print(f"\n📋 Всего не-NBA матчей: {len(games)}")
+    print(f"\n📋 Всего матчей: {len(games)}")
     
     enriched_games = []
     
@@ -169,12 +139,12 @@ def update_master_cache():
         home_abbr = home.get("code", home_name[:3]).upper()
         away_abbr = away.get("code", away_name[:3]).upper()
         
-        # Получаем название лиги/турнира
-        league = game.get("league", {}).get("name", "Unknown")
-        tournament = game.get("tournament", {}).get("name", "")
-        league_name = tournament if tournament else league
+        # Название турнира/лиги
+        league = game.get("tournament", {}).get("name", "")
+        if not league:
+            league = game.get("league", {}).get("name", "")
         
-        print(f"\n🔍 [{idx}/{len(games)}] [{league_name}] {home_abbr} vs {away_abbr}")
+        print(f"\n🔍 [{idx}/{len(games)}] [{league}] {home_abbr} vs {away_abbr}")
         
         home_avg, home_cnt = fetch_last_games(home_id, 10)
         away_avg, away_cnt = fetch_last_games(away_id, 10)
@@ -183,7 +153,7 @@ def update_master_cache():
         enriched_games.append({
             "game_id": game.get("id"),
             "date": game.get("date", {}).get("start", ""),
-            "league": league_name,
+            "league": league,
             "home_team": {
                 "id": home_id,
                 "name": home_name,
@@ -208,8 +178,21 @@ def update_master_cache():
     master_cache["loading"] = False
     
     print("\n" + "=" * 60)
-    print(f"✅ ОБНОВЛЕНИЕ ЗАВЕРШЕНО! Обработано {len(enriched_games)} не-NBA матчей")
+    print(f"✅ ОБНОВЛЕНИЕ ЗАВЕРШЕНО! Обработано {len(enriched_games)} матчей")
     print("=" * 60)
+
+@app.route('/', methods=['GET'])
+def index():
+    return jsonify({
+        "service": "NBA Total Predictor API",
+        "version": "7.0",
+        "status": "running",
+        "endpoints": {
+            "/upcoming_stats": "GET - Статистика предстоящих матчей",
+            "/health": "GET - Статус сервера",
+            "/debug": "GET - Диагностика"
+        }
+    })
 
 @app.route('/upcoming_stats', methods=['GET'])
 def get_upcoming_stats():
@@ -232,14 +215,14 @@ def health():
 @app.route('/debug', methods=['GET'])
 def debug():
     return jsonify({
-        "api_key": API_KEY[:10] + "...",
+        "api_source": "v1.basketball.api-sports.io",
         "cached_games": len(master_cache["data"]) if master_cache["data"] else 0,
-        "nba_excluded": True
+        "last_update": master_cache["last_update"]
     })
 
 print("🚀 NBA Total Predictor Server v7")
-print("📡 Используем v1.basketball.api-sports.io (все лиги кроме NBA)")
-print("🚫 NBA исключена из анализа")
+print("📡 Источник: v1.basketball.api-sports.io (все лиги, NBA отсутствует)")
+print("⏱️  Обновление каждые 6 часов")
 
 threading.Thread(target=update_master_cache).start()
 
