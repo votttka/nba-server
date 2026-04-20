@@ -1,5 +1,6 @@
 import os
 import requests
+import time
 from datetime import datetime, timedelta
 from flask import Flask, jsonify, request
 from flask_cors import CORS
@@ -7,7 +8,7 @@ from flask_cors import CORS
 app = Flask(__name__)
 CORS(app)
 
-API_KEY = "de0a081d8eb05282905920ff73eba124"
+API_KEY = os.environ.get("API_SPORTS_KEY")
 BASE_URL = "https://v1.basketball.api-sports.io"
 HEADERS = {'x-apisports-key': API_KEY}
 
@@ -53,14 +54,18 @@ def fetch_matches():
                             }
                         }
                         all_matches.append(match)
+            else:
+                print(f"Ошибка {date}: статус {response.status_code}")
                         
         except Exception as e:
             print(f"Ошибка {date}: {e}")
+        
+        time.sleep(0.3)
     
     return all_matches
 
 def get_team_avg_points(team_id, limit=10):
-    """Возвращает среднее очков команды за последние N игр"""
+    """Получает последние limit игр команды и возвращает среднее очков"""
     try:
         response = requests.get(
             f"{BASE_URL}/games",
@@ -73,7 +78,7 @@ def get_team_avg_points(team_id, limit=10):
             data = response.json()
             games = data.get("response", [])[:limit]
             
-            total = 0
+            total_points = 0
             count = 0
             
             for game in games:
@@ -83,17 +88,18 @@ def get_team_avg_points(team_id, limit=10):
                     points = game.get("scores", {}).get("visitors", {}).get("points")
                 
                 if points and points > 0:
-                    total += points
+                    total_points += points
                     count += 1
             
-            return round(total / count, 2) if count > 0 else 0
+            avg = round(total_points / count, 2) if count > 0 else 0
+            return avg
         
         return 0
     except Exception as e:
         return 0
 
 def get_h2h_avg_total(team1_id, team2_id, limit=5):
-    """Возвращает средний тотал за последние N личных встреч"""
+    """Получает последние limit личных встреч и возвращает средний тотал"""
     try:
         response = requests.get(
             f"{BASE_URL}/games",
@@ -106,7 +112,7 @@ def get_h2h_avg_total(team1_id, team2_id, limit=5):
             data = response.json()
             games = data.get("response", [])[:limit]
             
-            total = 0
+            total_points = 0
             count = 0
             
             for game in games:
@@ -114,10 +120,11 @@ def get_h2h_avg_total(team1_id, team2_id, limit=5):
                 away_score = game.get("scores", {}).get("visitors", {}).get("points")
                 
                 if home_score and away_score:
-                    total += home_score + away_score
+                    total_points += home_score + away_score
                     count += 1
             
-            return round(total / count, 2) if count > 0 else 0
+            avg = round(total_points / count, 2) if count > 0 else 0
+            return avg
         
         return 0
     except Exception as e:
@@ -125,29 +132,30 @@ def get_h2h_avg_total(team1_id, team2_id, limit=5):
 
 @app.route('/matches', methods=['GET'])
 def get_matches():
+    """Возвращает список матчей (без статистики)"""
     if matches_cache["data"] is None:
         return jsonify({"error": "Loading...", "status": "loading"}), 503
     
     return jsonify({
         "success": True,
+        "last_update": matches_cache["last_update"],
         "matches": matches_cache["data"],
         "total": len(matches_cache["data"])
     })
 
 @app.route('/stats', methods=['GET'])
 def get_stats():
+    """Возвращает статистику для конкретного матча"""
     match_id = request.args.get('match_id')
     
     if not match_id:
         return jsonify({"error": "match_id required"}), 400
     
-    # Проверяем кэш
     if match_id in stats_cache:
         cache_time = stats_cache[match_id]["last_update"]
         if datetime.now() - datetime.fromisoformat(cache_time) < timedelta(hours=1):
             return jsonify(stats_cache[match_id]["data"])
     
-    # Ищем матч
     match = None
     if matches_cache["data"]:
         for m in matches_cache["data"]:
@@ -161,7 +169,6 @@ def get_stats():
     home_id = match["home_team"]["id"]
     away_id = match["away_team"]["id"]
     
-    # Получаем статистику
     home_avg = get_team_avg_points(home_id, 10)
     away_avg = get_team_avg_points(away_id, 10)
     h2h_avg = get_h2h_avg_total(home_id, away_id, 5)
@@ -174,7 +181,6 @@ def get_stats():
         "h2h_avg_total": h2h_avg
     }
     
-    # Кэшируем
     stats_cache[match_id] = {
         "data": result,
         "last_update": datetime.now().isoformat()
@@ -190,8 +196,8 @@ def health():
         "cached_stats": len(stats_cache)
     })
 
-# Запуск
 print("🚀 Сервер запускается...")
+print(f"🔑 API Key загружен: {'Да' if API_KEY else 'Нет'}")
 
 matches_cache["data"] = fetch_matches()
 matches_cache["last_update"] = datetime.now().isoformat()
