@@ -8,7 +8,7 @@ from flask_cors import CORS
 app = Flask(__name__)
 CORS(app)
 
-API_KEY = os.environ.get("API_SPORTS_KEY")
+API_KEY = "de0a081d8eb05282905920ff73eba124"
 BASE_URL = "https://v1.basketball.api-sports.io"
 HEADERS = {'x-apisports-key': API_KEY}
 
@@ -24,6 +24,7 @@ def fetch_matches():
         date = (today + timedelta(days=i)).strftime("%Y-%m-%d")
         
         try:
+            print(f"Запрос к API за {date}...")
             response = requests.get(
                 f"{BASE_URL}/games",
                 params={"date": date},
@@ -31,34 +32,46 @@ def fetch_matches():
                 timeout=30
             )
             
+            print(f"Статус ответа: {response.status_code}")
+            
             if response.status_code == 200:
+                # Проверяем, что ответ - словарь, а не строка
                 data = response.json()
-                games = data.get("response", [])
                 
-                for game in games:
-                    status = game.get("status", {}).get("long", "")
-                    if status in ["Not Started", "Scheduled"]:
-                        match = {
-                            "id": game.get("id"),
-                            "date": game.get("date", {}).get("start", ""),
-                            "league": game.get("league", {}).get("name", "Unknown"),
-                            "home_team": {
-                                "id": game.get("teams", {}).get("home", {}).get("id"),
-                                "name": game.get("teams", {}).get("home", {}).get("name"),
-                                "abbreviation": game.get("teams", {}).get("home", {}).get("code", "")
-                            },
-                            "away_team": {
-                                "id": game.get("teams", {}).get("visitors", {}).get("id"),
-                                "name": game.get("teams", {}).get("visitors", {}).get("name"),
-                                "abbreviation": game.get("teams", {}).get("visitors", {}).get("code", "")
-                            }
-                        }
-                        all_matches.append(match)
+                if isinstance(data, dict):
+                    games = data.get("response", [])
+                    if isinstance(games, list):
+                        for game in games:
+                            status = game.get("status", {}).get("long", "")
+                            if status in ["Not Started", "Scheduled"]:
+                                match = {
+                                    "id": game.get("id"),
+                                    "date": game.get("date", {}).get("start", ""),
+                                    "league": game.get("league", {}).get("name", "Unknown"),
+                                    "home_team": {
+                                        "id": game.get("teams", {}).get("home", {}).get("id"),
+                                        "name": game.get("teams", {}).get("home", {}).get("name"),
+                                        "abbreviation": game.get("teams", {}).get("home", {}).get("code", "")
+                                    },
+                                    "away_team": {
+                                        "id": game.get("teams", {}).get("visitors", {}).get("id"),
+                                        "name": game.get("teams", {}).get("visitors", {}).get("name"),
+                                        "abbreviation": game.get("teams", {}).get("visitors", {}).get("code", "")
+                                    }
+                                }
+                                all_matches.append(match)
+                        print(f"   ✅ {date}: {len([m for m in all_matches if m.get('date', '').startswith(date)])} матчей")
+                    else:
+                        print(f"   ❌ {date}: response не список")
+                else:
+                    print(f"   ❌ {date}: данные не словарь, а {type(data)}")
+                    print(f"   Содержимое: {data[:200] if isinstance(data, str) else data}")
             else:
-                print(f"Ошибка {date}: статус {response.status_code}")
+                print(f"   ❌ {date}: ошибка {response.status_code}")
+                print(f"   Ответ: {response.text[:200]}")
                         
         except Exception as e:
-            print(f"Ошибка {date}: {e}")
+            print(f"   ❌ Ошибка {date}: {e}")
         
         time.sleep(0.3)
     
@@ -76,24 +89,21 @@ def get_team_avg_points(team_id, limit=10):
         
         if response.status_code == 200:
             data = response.json()
-            games = data.get("response", [])[:limit]
-            
-            total_points = 0
-            count = 0
-            
-            for game in games:
-                if game.get("teams", {}).get("home", {}).get("id") == team_id:
-                    points = game.get("scores", {}).get("home", {}).get("points")
-                else:
-                    points = game.get("scores", {}).get("visitors", {}).get("points")
-                
-                if points and points > 0:
-                    total_points += points
-                    count += 1
-            
-            avg = round(total_points / count, 2) if count > 0 else 0
-            return avg
-        
+            if isinstance(data, dict):
+                games = data.get("response", [])
+                if isinstance(games, list):
+                    games = games[:limit]
+                    total_points = 0
+                    count = 0
+                    for game in games:
+                        if game.get("teams", {}).get("home", {}).get("id") == team_id:
+                            points = game.get("scores", {}).get("home", {}).get("points")
+                        else:
+                            points = game.get("scores", {}).get("visitors", {}).get("points")
+                        if points and points > 0:
+                            total_points += points
+                            count += 1
+                    return round(total_points / count, 2) if count > 0 else 0
         return 0
     except Exception as e:
         return 0
@@ -110,29 +120,33 @@ def get_h2h_avg_total(team1_id, team2_id, limit=5):
         
         if response.status_code == 200:
             data = response.json()
-            games = data.get("response", [])[:limit]
-            
-            total_points = 0
-            count = 0
-            
-            for game in games:
-                home_score = game.get("scores", {}).get("home", {}).get("points")
-                away_score = game.get("scores", {}).get("visitors", {}).get("points")
-                
-                if home_score and away_score:
-                    total_points += home_score + away_score
-                    count += 1
-            
-            avg = round(total_points / count, 2) if count > 0 else 0
-            return avg
-        
+            if isinstance(data, dict):
+                games = data.get("response", [])
+                if isinstance(games, list):
+                    games = games[:limit]
+                    total_points = 0
+                    count = 0
+                    for game in games:
+                        home_score = game.get("scores", {}).get("home", {}).get("points")
+                        away_score = game.get("scores", {}).get("visitors", {}).get("points")
+                        if home_score and away_score:
+                            total_points += home_score + away_score
+                            count += 1
+                    return round(total_points / count, 2) if count > 0 else 0
         return 0
     except Exception as e:
         return 0
 
+@app.route('/', methods=['GET'])
+def index():
+    return jsonify({
+        "service": "NBA Total Predictor API",
+        "status": "running",
+        "endpoints": ["/matches", "/stats", "/health"]
+    })
+
 @app.route('/matches', methods=['GET'])
 def get_matches():
-    """Возвращает список матчей (без статистики)"""
     if matches_cache["data"] is None:
         return jsonify({"error": "Loading...", "status": "loading"}), 503
     
@@ -145,7 +159,6 @@ def get_matches():
 
 @app.route('/stats', methods=['GET'])
 def get_stats():
-    """Возвращает статистику для конкретного матча"""
     match_id = request.args.get('match_id')
     
     if not match_id:
@@ -197,7 +210,6 @@ def health():
     })
 
 print("🚀 Сервер запускается...")
-print(f"🔑 API Key загружен: {'Да' if API_KEY else 'Нет'}")
 
 matches_cache["data"] = fetch_matches()
 matches_cache["last_update"] = datetime.now().isoformat()
