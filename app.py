@@ -5,233 +5,197 @@ from datetime import datetime, timedelta
 from flask import Flask, jsonify
 from flask_cors import CORS
 from apscheduler.schedulers.background import BackgroundScheduler
-from collections import OrderedDict
+import threading
 
 app = Flask(__name__)
 CORS(app)
 
-API_KEY = "b0c40eeb-3722-40bf-b190-8a47bd87a69d"
-BASE_URL = "https://api.balldontlie.io/v1"
+API_KEY = "de0a081d8eb05282905920ff73eba124"
 
-# Определяем сезоны: с 2025 по текущий год
-CURRENT_YEAR = datetime.now().year
-SEASONS = list(range(2025, CURRENT_YEAR + 1))
+# Два источника API
+API_SOURCES = {
+    "v1": {
+        "url": "https://v1.basketball.api-sports.io",
+        "headers": {
+            'x-rapidapi-host': 'v1.basketball.api-sports.io',
+            'x-rapidapi-key': API_KEY
+        }
+    },
+    "v2": {
+        "url": "https://v2.nba.api-sports.io",
+        "headers": {
+            'x-rapidapi-host': 'v2.nba.api-sports.io',
+            'x-rapidapi-key': API_KEY
+        }
+    }
+}
 
-print(f"📅 Загружаем данные для сезонов: {SEASONS}")
+master_cache = {"data": None, "last_update": None, "loading": False}
 
-TEAM_STATS_CACHE = OrderedDict()
-H2H_CACHE = OrderedDict()
-CACHE_TTL = 3600
+def make_api_request(source, endpoint, params=None):
+    """Делает запрос к API"""
+    try:
+        url = f"{API_SOURCES[source]['url']}/{endpoint}"
+        response = requests.get(url, params=params, headers=API_SOURCES[source]['headers'], timeout=30)
+        return response
+    except Exception as e:
+        print(f"Ошибка {source}: {e}")
+        return None
 
-master_cache = {"data": None, "last_update": None}
-
-def fetch_games_for_next_4_days():
-    """Получает список матчей на ближайшие 4 дня"""
-    today = datetime.now().date()
+def fetch_upcoming_games_from_source(source, days_ahead=1):
+    """Получает матчи из источника"""
     all_games = []
-    
-    for i in range(5):
-        date = today + timedelta(days=i)
-        date_str = date.strftime("%Y-%m-%d")
-        
-        url = f"{BASE_URL}/games"
-        params = {"dates[]": date_str, "per_page": 100}
-        headers = {"Authorization": API_KEY}
-        
-        try:
-            print(f"📅 Загрузка игр за {date_str}...")
-            response = requests.get(url, params=params, headers=headers, timeout=30)
-            if response.status_code == 200:
-                games = response.json().get("data", [])
-                all_games.extend(games)
-                print(f"   ✅ Найдено {len(games)} игр")
+    for i in range(days_ahead + 1):
+        date = (datetime.now() + timedelta(days=i)).strftime("%Y-%m-%d")
+        response = make_api_request(source, "games", {"date": date})
+        if response and response.status_code == 200:
+            games = response.json().get("response", [])
+            upcoming = [g for g in games if g.get("status", {}).get("long") in ["Not Started", "Scheduled"]]
+            all_games.extend(upcoming)
+            print(f"   {source.upper()} {date}: {len(upcoming)} матчей")
+        time.sleep(0.3)
+    return all_games
+
+def fetch_team_stats_from_source(source, team_id, games_count=20):
+    """Получает статистику команды"""
+    response = make_api_request(source, "games", {"team": team_id, "season": "2025-2026"})
+    if response and response.status_code == 200:
+        games = response.json().get("response", [])[:games_count]
+        total_points = 0
+        games_analyzed = 0
+        for game in games:
+            if game.get("teams", {}).get("home", {}).get("id") == team_id:
+                points = game.get("scores", {}).get("home", {}).get("points")
             else:
-                print(f"   ❌ Ошибка {response.status_code}")
-            time.sleep(0.5)
-        except Exception as e:
-            print(f"   ❌ Ошибка: {e}")
-    
-    return all_games
+                points = game.get("scores", {}).get("visitors", {}).get("points")
+            if points:
+                total_points += points
+                games_analyzed += 1
+        return round(total_points / games_analyzed, 2) if games_analyzed > 0 else 0, games_analyzed
+    return 0, 0
 
-def fetch_team_stats(team_id, limit=20):
-    """Получает последние игры команды за все сезоны с 2025"""
-    cache_key = f"team_{team_id}_seasons_{SEASONS[0]}_{SEASONS[-1]}"
-    if cache_key in TEAM_STATS_CACHE:
-        cached_time, data = TEAM_STATS_CACHE[cache_key]
-        if time.time() - cached_time < CACHE_TTL:
-            return data
-    
-    all_games = []
-    
-    # Запрашиваем данные для каждого сезона
-    for season in SEASONS:
-        url = f"{BASE_URL}/games"
-        params = {
-            "team_ids[]": team_id,
-            "per_page": limit,
-            "seasons[]": season
-        }
-        headers = {"Authorization": API_KEY}
-        
-        try:
-            response = requests.get(url, params=params, headers=headers, timeout=30)
-            if response.status_code == 200:
-                games = response.json().get("data", [])
-                all_games.extend(games)
-                print(f"   📊 Команда {team_id} сезон {season}: {len(games)} игр")
-            time.sleep(0.3)
-        except Exception as e:
-            print(f"   ❌ Ошибка: {e}")
-    
-    # Сортируем по дате и берем последние limit игр
-    all_games.sort(key=lambda x: x["date"], reverse=True)
-    all_games = all_games[:limit]
-    
-    TEAM_STATS_CACHE[cache_key] = (time.time(), all_games)
-    return all_games
-
-def calculate_average_points(games, team_id):
-    """Рассчитывает среднее количество очков команды"""
-    if not games:
-        return 0.0
-    
-    total_points = 0
-    count = 0
-    
-    for game in games:
-        if game["home_team"]["id"] == team_id and game["home_team_score"]:
-            total_points += game["home_team_score"]
-            count += 1
-        elif game["visitor_team"]["id"] == team_id and game["visitor_team_score"]:
-            total_points += game["visitor_team_score"]
-            count += 1
-    
-    return round(total_points / count, 2) if count > 0 else 0.0
-
-def fetch_h2h_stats(team1_id, team2_id, limit=10):
-    """Получает историю личных встреч за все сезоны с 2025"""
-    cache_key = f"h2h_{min(team1_id, team2_id)}_{max(team1_id, team2_id)}_seasons_{SEASONS[0]}_{SEASONS[-1]}"
-    if cache_key in H2H_CACHE:
-        cached_time, data = H2H_CACHE[cache_key]
-        if time.time() - cached_time < CACHE_TTL:
-            return data
-    
-    all_games = []
-    
-    for season in SEASONS:
-        url = f"{BASE_URL}/games"
-        params = {
-            "team_ids[]": f"{team1_id},{team2_id}",
-            "per_page": limit,
-            "seasons[]": season
-        }
-        headers = {"Authorization": API_KEY}
-        
-        try:
-            response = requests.get(url, params=params, headers=headers, timeout=30)
-            if response.status_code == 200:
-                games = response.json().get("data", [])
-                all_games.extend(games)
-                print(f"   🤝 H2H сезон {season}: {len(games)} встреч")
-            time.sleep(0.3)
-        except Exception as e:
-            print(f"   ❌ Ошибка: {e}")
-    
-    all_games.sort(key=lambda x: x["date"], reverse=True)
-    all_games = all_games[:limit]
-    
-    H2H_CACHE[cache_key] = (time.time(), all_games)
-    return all_games
-
-def calculate_h2h_average(games):
-    """Рассчитывает средний тотал в личных встречах"""
-    if not games:
-        return 0.0
-    
-    total_points = 0
-    count = 0
-    for game in games:
-        if game["home_team_score"] and game["visitor_team_score"]:
-            total_points += game["home_team_score"] + game["visitor_team_score"]
-            count += 1
-    
-    return round(total_points / count, 2) if count > 0 else 0.0
+def fetch_h2h_stats_from_source(source, team1_id, team2_id, games_count=10):
+    """Получает историю личных встреч"""
+    response = make_api_request(source, "games", {"h2h": f"{team1_id}-{team2_id}", "season": "2025-2026"})
+    if response and response.status_code == 200:
+        games = response.json().get("response", [])[:games_count]
+        total_points = 0
+        games_analyzed = 0
+        for game in games:
+            home_score = game.get("scores", {}).get("home", {}).get("points")
+            away_score = game.get("scores", {}).get("visitors", {}).get("points")
+            if home_score and away_score:
+                total_points += home_score + away_score
+                games_analyzed += 1
+        return round(total_points / games_analyzed, 2) if games_analyzed > 0 else 0, games_analyzed
+    return 0, 0
 
 def update_master_cache():
-    """Обновляет главный кэш"""
-    print("\n" + "=" * 60)
-    print("🔄 НАЧАЛО ОБНОВЛЕНИЯ КЭША")
-    print(f"📅 Сезоны: {SEASONS[0]} - {SEASONS[-1]}")
-    print("=" * 60)
-    
-    games = fetch_games_for_next_4_days()
-    
-    if not games:
-        print("❌ НЕТ ИГР НА БЛИЖАЙШИЕ 4 ДНЯ")
+    """Обновляет кэш - собирает данные с обоих источников"""
+    if master_cache["loading"]:
         return
     
-    print(f"\n📋 Найдено {len(games)} предстоящих матчей. Обработка...")
-    enriched_games = []
+    master_cache["loading"] = True
+    print("\n" + "=" * 60)
+    print(f"🔄 ОБНОВЛЕНИЕ КЭША - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print("=" * 60)
     
-    for idx, game in enumerate(games, 1):
-        home_team = game["home_team"]
-        away_team = game["visitor_team"]
+    # Собираем матчи с обоих источников
+    games_v1 = fetch_upcoming_games_from_source("v1", 1)
+    games_v2 = fetch_upcoming_games_from_source("v2", 1)
+    
+    # Объединяем уникальные матчи по game_id
+    all_games_dict = {}
+    for game in games_v1:
+        all_games_dict[game.get("id")] = game
+    for game in games_v2:
+        if game.get("id") not in all_games_dict:
+            all_games_dict[game.get("id")] = game
+    
+    print(f"\n📋 Уникальных матчей: {len(all_games_dict)}")
+    
+    if not all_games_dict:
+        print("❌ НЕТ ПРЕДСТОЯЩИХ МАТЧЕЙ")
+        master_cache["loading"] = False
+        return
+    
+    enriched_games = []
+    total_requests = {"v1": 0, "v2": 0}
+    
+    for idx, (game_id, game) in enumerate(all_games_dict.items(), 1):
+        home = game.get("teams", {}).get("home", {})
+        away = game.get("teams", {}).get("visitors", {})
         
-        print(f"\n🔍 [{idx}/{len(games)}] {home_team['abbreviation']} vs {away_team['abbreviation']}")
+        home_id = home.get("id")
+        away_id = away.get("id")
         
-        home_games = fetch_team_stats(home_team["id"], 20)
-        away_games = fetch_team_stats(away_team["id"], 20)
-        h2h_games = fetch_h2h_stats(home_team["id"], away_team["id"], 10)
+        if not home_id or not away_id:
+            continue
         
-        home_avg = calculate_average_points(home_games, home_team["id"])
-        away_avg = calculate_average_points(away_games, away_team["id"])
-        h2h_avg = calculate_h2h_average(h2h_games)
+        home_name = home.get("name", "Unknown")
+        away_name = away.get("name", "Unknown")
+        home_abbr = home.get("code", home_name[:3]).upper()
+        away_abbr = away.get("code", away_name[:3]).upper()
         
-        predicted_total = round((home_avg * 0.3) + (away_avg * 0.3) + (h2h_avg * 0.4), 2)
+        print(f"\n🔍 [{idx}/{len(all_games_dict)}] {home_abbr} vs {away_abbr}")
+        
+        # Собираем данные с v1
+        h1_avg, h1_cnt = fetch_team_stats_from_source("v1", home_id, 20)
+        a1_avg, a1_cnt = fetch_team_stats_from_source("v1", away_id, 20)
+        h2h1_avg, h2h1_cnt = fetch_h2h_stats_from_source("v1", home_id, away_id, 10)
+        total_requests["v1"] += 3
+        
+        # Собираем данные с v2
+        h2_avg, h2_cnt = fetch_team_stats_from_source("v2", home_id, 20)
+        a2_avg, a2_cnt = fetch_team_stats_from_source("v2", away_id, 20)
+        h2h2_avg, h2h2_cnt = fetch_h2h_stats_from_source("v2", home_id, away_id, 10)
+        total_requests["v2"] += 3
+        
+        # Усредняем данные с обоих источников
+        home_avg = round((h1_avg + h2_avg) / 2, 2) if h1_avg and h2_avg else (h1_avg or h2_avg)
+        away_avg = round((a1_avg + a2_avg) / 2, 2) if a1_avg and a2_avg else (a1_avg or a2_avg)
+        h2h_avg = round((h2h1_avg + h2h2_avg) / 2, 2) if h2h1_avg and h2h2_avg else (h2h1_avg or h2h2_avg)
         
         enriched_games.append({
-            "game_id": game["id"],
-            "date": game["date"],
+            "game_id": game_id,
+            "date": game.get("date", {}).get("start", ""),
             "home_team": {
-                "id": home_team["id"],
-                "name": home_team["full_name"],
-                "abbreviation": home_team["abbreviation"]
+                "id": home_id,
+                "name": home_name,
+                "abbreviation": home_abbr
             },
             "away_team": {
-                "id": away_team["id"],
-                "name": away_team["full_name"],
-                "abbreviation": away_team["abbreviation"]
+                "id": away_id,
+                "name": away_name,
+                "abbreviation": away_abbr
             },
-            "home_stats": {
-                "avg_points": home_avg,
-                "games_analyzed": len(home_games)
-            },
-            "away_stats": {
-                "avg_points": away_avg,
-                "games_analyzed": len(away_games)
-            },
-            "h2h_stats": {
-                "avg_total": h2h_avg,
-                "games_analyzed": len(h2h_games)
-            },
-            "predicted_total": predicted_total
+            "home_avg_points": home_avg,
+            "away_avg_points": away_avg,
+            "h2h_avg_total": h2h_avg
         })
         
-        print(f"   📈 Прогноз: {predicted_total} | H:{home_avg} A:{away_avg} H2H:{h2h_avg}")
+        print(f"   📊 Результат: H:{home_avg} A:{away_avg} H2H:{h2h_avg}")
+        print(f"   📡 v1: H:{h1_avg} A:{a1_avg} H2H:{h2h1_avg}")
+        print(f"   📡 v2: H:{h2_avg} A:{a2_avg} H2H:{h2h2_avg}")
         
         time.sleep(0.5)
     
     master_cache["data"] = enriched_games
     master_cache["last_update"] = datetime.now().isoformat()
+    master_cache["loading"] = False
     
     print("\n" + "=" * 60)
-    print(f"✅ ОБНОВЛЕНИЕ ЗАВЕРШЕНО! Обработано {len(enriched_games)} матчей")
+    print(f"✅ ОБНОВЛЕНИЕ ЗАВЕРШЕНО")
+    print(f"📊 Обработано матчей: {len(enriched_games)}")
+    print(f"📡 Запросов к v1: {total_requests['v1']}")
+    print(f"📡 Запросов к v2: {total_requests['v2']}")
     print("=" * 60)
 
-@app.route('/upcoming_with_stats', methods=['GET'])
-def get_upcoming_with_stats():
+@app.route('/upcoming_stats', methods=['GET'])
+def get_upcoming_stats():
+    """Возвращает статистику предстоящих матчей"""
     if master_cache["data"] is None:
-        return jsonify({"error": "Data is loading, please try again in 30 seconds", "status": "loading"}), 503
+        return jsonify({"error": "Data is loading, please wait", "status": "loading"}), 503
     
     return jsonify({
         "success": True,
@@ -243,25 +207,44 @@ def get_upcoming_with_stats():
 @app.route('/health', methods=['GET'])
 def health():
     return jsonify({
-        "status": "healthy", 
+        "status": "healthy",
         "cached_games": len(master_cache["data"]) if master_cache["data"] else 0,
-        "seasons": SEASONS
+        "last_update": master_cache["last_update"]
     })
 
 @app.route('/debug', methods=['GET'])
 def debug():
     return jsonify({
-        "seasons_loaded": SEASONS,
+        "api_key": API_KEY[:10] + "...",
+        "sources": ["v1", "v2"],
         "cached_games": len(master_cache["data"]) if master_cache["data"] else 0,
-        "api_key_configured": True
+        "last_update": master_cache["last_update"]
     })
 
-# Запускаем обновление
-print(f"🚀 Сервер запускается. Сезоны для анализа: {SEASONS}")
-update_master_cache()
+@app.route('/', methods=['GET'])
+def index():
+    return jsonify({
+        "service": "NBA Total Predictor API",
+        "version": "3.0",
+        "description": "Собирает данные с v1.basketball.api-sports.io и v2.nba.api-sports.io",
+        "endpoints": {
+            "/upcoming_stats": "GET - Статистика предстоящих матчей",
+            "/health": "GET - Статус сервера",
+            "/debug": "GET - Диагностика"
+        }
+    })
 
+# Запуск обновления при старте
+print("🚀 NBA Total Predictor Server v3")
+print(f"🔑 API Key: {API_KEY[:10]}...")
+print("📡 Источники: v1.basketball.api-sports.io, v2.nba.api-sports.io")
+print("⏱️  Обновление каждые 6 часов (4 раза в сутки)\n")
+
+threading.Thread(target=update_master_cache).start()
+
+# Обновление каждые 6 часов (4 раза в сутки) - соблюдаем лимит 100 запросов/день
 scheduler = BackgroundScheduler()
-scheduler.add_job(func=update_master_cache, trigger="interval", hours=1)
+scheduler.add_job(func=update_master_cache, trigger="interval", hours=6)
 scheduler.start()
 
 if __name__ == '__main__':
