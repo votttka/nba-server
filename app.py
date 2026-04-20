@@ -8,15 +8,25 @@ from flask_cors import CORS
 app = Flask(__name__)
 CORS(app)
 
-API_KEY = "de0a081d8eb05282905920ff73eba124"
+# Берём API ключ из переменной окружения
+API_KEY = os.environ.get("API_SPORTS_KEY")
+if not API_KEY:
+    print("⚠️ ВНИМАНИЕ: API_SPORTS_KEY не задан в переменных окружения!")
+    # Для локального тестирования можно указать запасной ключ, но на проде лучше не падать
+    # API_KEY = "de0a081d8eb05282905920ff73eba124"  # раскомментировать только для теста
+
 BASE_URL = "https://v1.basketball.api-sports.io"
-HEADERS = {'x-apisports-key': API_KEY}
+HEADERS = {'x-apisports-key': API_KEY} if API_KEY else {}
 
 matches_cache = {"data": None, "last_update": None}
 stats_cache = {}
 
 def fetch_matches():
     """Загружает матчи на сегодня и завтра"""
+    if not API_KEY:
+        print("❌ Нет API ключа, загрузка матчей невозможна")
+        return []
+    
     all_matches = []
     today = datetime.now()
     
@@ -35,9 +45,7 @@ def fetch_matches():
             print(f"Статус ответа: {response.status_code}")
             
             if response.status_code == 200:
-                # Проверяем, что ответ - словарь, а не строка
                 data = response.json()
-                
                 if isinstance(data, dict):
                     games = data.get("response", [])
                     if isinstance(games, list):
@@ -65,7 +73,6 @@ def fetch_matches():
                         print(f"   ❌ {date}: response не список")
                 else:
                     print(f"   ❌ {date}: данные не словарь, а {type(data)}")
-                    print(f"   Содержимое: {data[:200] if isinstance(data, str) else data}")
             else:
                 print(f"   ❌ {date}: ошибка {response.status_code}")
                 print(f"   Ответ: {response.text[:200]}")
@@ -79,6 +86,8 @@ def fetch_matches():
 
 def get_team_avg_points(team_id, limit=10):
     """Получает последние limit игр команды и возвращает среднее очков"""
+    if not API_KEY:
+        return 0
     try:
         response = requests.get(
             f"{BASE_URL}/games",
@@ -110,6 +119,8 @@ def get_team_avg_points(team_id, limit=10):
 
 def get_h2h_avg_total(team1_id, team2_id, limit=5):
     """Получает последние limit личных встреч и возвращает средний тотал"""
+    if not API_KEY:
+        return 0
     try:
         response = requests.get(
             f"{BASE_URL}/games",
@@ -142,6 +153,7 @@ def index():
     return jsonify({
         "service": "NBA Total Predictor API",
         "status": "running",
+        "api_key_set": bool(API_KEY),
         "endpoints": ["/matches", "/stats", "/health"]
     })
 
@@ -206,10 +218,17 @@ def health():
     return jsonify({
         "status": "healthy",
         "cached_matches": len(matches_cache["data"]) if matches_cache["data"] else 0,
-        "cached_stats": len(stats_cache)
+        "cached_stats": len(stats_cache),
+        "api_key_configured": bool(API_KEY)
     })
 
+# Запуск
 print("🚀 Сервер запускается...")
+if API_KEY:
+    print(f"🔑 API ключ загружен из переменной окружения (первые {min(5, len(API_KEY))} символов: {API_KEY[:5]}...)")
+else:
+    print("❌ API_SPORTS_KEY не найден в переменных окружения!")
+    print("   Убедитесь, что в Render добавлена переменная окружения API_SPORTS_KEY")
 
 matches_cache["data"] = fetch_matches()
 matches_cache["last_update"] = datetime.now().isoformat()
