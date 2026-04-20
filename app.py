@@ -24,7 +24,6 @@ master_cache = {"data": None, "last_update": None}
 def fetch_games_for_next_4_days():
     """Получает список матчей на ближайшие 4 дня"""
     today = datetime.now().date()
-    end_date = today + timedelta(days=4)
     
     all_games = []
     for i in range(5):
@@ -36,16 +35,17 @@ def fetch_games_for_next_4_days():
         headers = {"Authorization": API_KEY}
         
         try:
+            print(f"📅 Загрузка игр за {date_str}...")
             response = requests.get(url, params=params, headers=headers, timeout=30)
             if response.status_code == 200:
                 games = response.json().get("data", [])
                 all_games.extend(games)
-                print(f"✅ Загружено {len(games)} игр на {date_str}")
+                print(f"   ✅ Загружено {len(games)} игр")
             else:
-                print(f"❌ Ошибка {response.status_code} для {date_str}")
-            time.sleep(0.5)  # Пауза, чтобы не превысить лимит API
+                print(f"   ❌ Ошибка {response.status_code}")
+            time.sleep(0.5)
         except Exception as e:
-            print(f"❌ Ошибка при загрузке игр за {date_str}: {e}")
+            print(f"   ❌ Ошибка: {e}")
     
     return all_games
 
@@ -55,7 +55,7 @@ def fetch_team_stats(team_id, limit=15):
     if cache_key in TEAM_STATS_CACHE:
         cached_time, data = TEAM_STATS_CACHE[cache_key]
         if time.time() - cached_time < CACHE_TTL:
-            print(f"📦 Кэш для команды {team_id}")
+            print(f"   📦 Кэш для команды {team_id}")
             return data
     
     url = f"{BASE_URL}/games"
@@ -71,14 +71,14 @@ def fetch_team_stats(team_id, limit=15):
         if response.status_code == 200:
             games = response.json().get("data", [])
             TEAM_STATS_CACHE[cache_key] = (time.time(), games)
-            print(f"✅ Загружено {len(games)} игр для команды {team_id}")
+            print(f"   ✅ Загружено {len(games)} игр для команды {team_id}")
             return games
     except Exception as e:
-        print(f"❌ Ошибка при загрузке статистики команды {team_id}: {e}")
+        print(f"   ❌ Ошибка: {e}")
     return []
 
 def calculate_average_points(games, team_id):
-    """Рассчитывает среднее количество очков команды за последние игры"""
+    """Рассчитывает среднее количество очков команды"""
     if not games:
         return 0.0
     
@@ -101,7 +101,7 @@ def fetch_h2h_stats(team1_id, team2_id, limit=5):
     if cache_key in H2H_CACHE:
         cached_time, data = H2H_CACHE[cache_key]
         if time.time() - cached_time < CACHE_TTL:
-            print(f"📦 Кэш H2H для {team1_id} vs {team2_id}")
+            print(f"   📦 Кэш H2H")
             return data
     
     url = f"{BASE_URL}/games"
@@ -117,10 +117,10 @@ def fetch_h2h_stats(team1_id, team2_id, limit=5):
         if response.status_code == 200:
             games = response.json().get("data", [])
             H2H_CACHE[cache_key] = (time.time(), games)
-            print(f"✅ Загружено {len(games)} личных встреч")
+            print(f"   ✅ Загружено {len(games)} личных встреч")
             return games
     except Exception as e:
-        print(f"❌ Ошибка при загрузке H2H: {e}")
+        print(f"   ❌ Ошибка: {e}")
     return []
 
 def calculate_h2h_average(games):
@@ -135,31 +135,27 @@ def calculate_h2h_average(games):
     return round(total_points / len(games), 2)
 
 def update_master_cache():
-    """Обновляет главный кэш со статистикой всех матчей"""
+    """Обновляет главный кэш"""
     print("🔄 Начинаю обновление кэша...")
     print("=" * 50)
     
     games = fetch_games_for_next_4_days()
     if not games:
-        print("❌ Не найдено игр для обновления")
+        print("❌ Не найдено игр")
         return
     
     enriched_games = []
-    total_teams = len(games) * 2
     
     for idx, game in enumerate(games, 1):
         home_team = game["home_team"]
         away_team = game["visitor_team"]
         
-        print(f"\n📊 Обработка матча {idx}/{len(games)}:")
-        print(f"   {home_team['full_name']} vs {away_team['full_name']}")
+        print(f"\n📊 {idx}/{len(games)}: {home_team['full_name']} vs {away_team['full_name']}")
         
-        # Получаем статистику
         home_games = fetch_team_stats(home_team["id"], 15)
         away_games = fetch_team_stats(away_team["id"], 15)
         h2h_games = fetch_h2h_stats(home_team["id"], away_team["id"], 5)
         
-        # Рассчитываем средние
         home_avg = calculate_average_points(home_games, home_team["id"])
         away_avg = calculate_average_points(away_games, away_team["id"])
         h2h_avg = calculate_h2h_average(h2h_games)
@@ -194,23 +190,17 @@ def update_master_cache():
             "predicted_total": predicted_total
         })
         
-        print(f"   📈 Прогноз тотала: {predicted_total}")
-        print(f"   🏠 {home_team['abbreviation']} среднее: {home_avg}")
-        print(f"   ✈️ {away_team['abbreviation']} среднее: {away_avg}")
-        print(f"   🤝 Личные встречи средний тотал: {h2h_avg}")
+        print(f"   📈 Прогноз: {predicted_total}")
         
-        # Небольшая пауза между командами, чтобы не превысить лимит
         time.sleep(1)
     
     master_cache["data"] = enriched_games
     master_cache["last_update"] = datetime.now().isoformat()
     print("\n" + "=" * 50)
-    print(f"✅ Кэш обновлён! Обработано {len(enriched_games)} матчей")
-    print(f"🕐 Время обновления: {master_cache['last_update']}")
+    print(f"✅ Обновлено! {len(enriched_games)} матчей")
 
 @app.route('/upcoming_with_stats', methods=['GET'])
 def get_upcoming_with_stats():
-    """Эндпоинт для мобильного приложения"""
     if master_cache["data"] is None:
         return jsonify({
             "error": "Data is loading, please try again in 30 seconds",
@@ -226,7 +216,6 @@ def get_upcoming_with_stats():
 
 @app.route('/health', methods=['GET'])
 def health():
-    """Эндпоинт для проверки здоровья сервера"""
     return jsonify({
         "status": "healthy",
         "cache_age": master_cache["last_update"],
@@ -235,17 +224,16 @@ def health():
 
 @app.route('/', methods=['GET'])
 def index():
-    """Корневой эндпоинт"""
     return jsonify({
         "service": "NBA Total Predictor API",
         "version": "1.0.0",
         "endpoints": {
             "/upcoming_with_stats": "GET - Получить матчи со статистикой",
-            "/health": "GET - Проверить статус сервера"
+            "/health": "GET - Проверить статус"
         }
     })
 
-# Запускаем планировщик для обновления кэша каждый час
+# Запускаем планировщик
 scheduler = BackgroundScheduler()
 scheduler.add_job(func=update_master_cache, trigger="interval", hours=1)
 scheduler.start()
@@ -253,8 +241,7 @@ scheduler.start()
 if __name__ == '__main__':
     print("🏀 NBA Total Predictor Server Starting...")
     print("=" * 50)
-    # При старте сразу обновляем кэш
     update_master_cache()
     port = int(os.environ.get("PORT", 10000))
-    print(f"\n🚀 Сервер запущен на порту {port}")
+    print(f"\n🚀 Сервер на порту {port}")
     app.run(host='0.0.0.0', port=port)
